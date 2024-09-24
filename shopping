@@ -1,0 +1,262 @@
+package com.bta.core.servlets;
+
+import com.bta.core.pojo.basket.BasketResponse;
+import com.bta.core.services.MockJson;
+import com.bta.core.services.sfcc.shoppingbag.ShoppingBagService;
+import com.bta.core.utils.CommonUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import lombok.NonNull;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.sling.api.SlingHttpServletRequest;
+import org.apache.sling.api.SlingHttpServletResponse;
+import org.apache.sling.api.adapter.AdapterManager;
+import org.apache.sling.api.resource.ResourceResolver;
+import org.apache.sling.api.resource.ResourceResolverFactory;
+import org.apache.sling.api.servlets.ServletResolverConstants;
+import org.apache.sling.api.servlets.SlingAllMethodsServlet;
+import org.osgi.framework.Constants;
+import org.osgi.service.component.annotations.Component;
+import org.osgi.service.component.annotations.Reference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.Servlet;
+import javax.servlet.http.Cookie;
+import java.io.IOException;
+
+@Component(service = Servlet.class, property = {Constants.SERVICE_DESCRIPTION + "=ShoppingBagServlet", ServletResolverConstants.SLING_SERVLET_METHODS + "=GET", ServletResolverConstants.SLING_SERVLET_METHODS + "=POST", ServletResolverConstants.SLING_SERVLET_PATHS + "=/bin/bta/shoppingbagservlet", ServletResolverConstants.SLING_SERVLET_EXTENSIONS + "=json"})
+public class ShoppingBagServlet extends SlingAllMethodsServlet {
+
+    protected static final Logger LOGGER = LoggerFactory.getLogger(ShoppingBagServlet.class);
+    private static final String C_JSON = "cjson";
+    private static final String C_JSON_DATA = "c_jsonData";
+    private static final String ATTEMPT = "attempt";
+
+    private static final long serialVersionUID = 1L;
+    @Reference
+    private transient ShoppingBagService shoppingBagService;
+    @Reference
+    private MockJson mockJson;
+    @Reference
+    private transient AdapterManager adapterManager;
+
+    @Reference
+    private transient ResourceResolverFactory resourceResolverFactory;
+
+    /**
+     * @param request  The HTTP request
+     * @param response The HTTP response
+     */
+    @Override
+    protected void doGet(@NonNull SlingHttpServletRequest request, @NonNull SlingHttpServletResponse response) throws IOException {
+
+        BasketResponse basket = null;
+        String siteId = null;
+        ResourceResolver resourceResolver = CommonUtil.getReadServiceResourceResolver(resourceResolverFactory);
+
+        String basketId = (request.getParameter("basketId") != null) ? request.getParameter("basketId") : null;
+        String itemId = (request.getParameter("itemId") != null) ? request.getParameter("itemId") : null;
+        String pagePath = (request.getParameter("pagePath") != null) ? request.getParameter("pagePath") : null;
+        String selector = request.getRequestPathInfo().getSelectorString();
+        String customerId = CommonUtil.readCookie(request, "customer_id");
+        String accessToken = CommonUtil.readCookie(request, "accessTkn");
+        if (null != pagePath) {
+            siteId = CommonUtil.getChanelId(resourceResolver, pagePath);
+        }
+
+        if (null != selector && null != accessToken && null != siteId) {
+            if (selector.equals("getBasket")) {
+                basket = shoppingBagService.getBasket(customerId, siteId, accessToken);
+            } else if (selector.equals("removeItem")) {
+                basket = shoppingBagService.removeProductFromBasket(basketId, siteId, accessToken, itemId);
+            }
+        }
+        if (null != basket) {
+            response.setContentType("application/json");
+            response.setCharacterEncoding("UTF-8");
+            response.getWriter().println(new ObjectMapper().writeValueAsString(basket));
+        }
+    }
+
+    @Override
+    protected void doPost(@NonNull SlingHttpServletRequest request, @NonNull SlingHttpServletResponse response) throws IOException {
+
+        ResourceResolver resourceResolver = CommonUtil.getReadServiceResourceResolver(resourceResolverFactory);
+        String pagePath = (request.getParameter("pagePath") != null) ? request.getParameter("pagePath") : null;
+        boolean gift = request.getParameter("gift") != null && Boolean.parseBoolean(request.getParameter("gift"));
+        String selector = request.getRequestPathInfo().getSelectorString();
+        String customerId = CommonUtil.readCookie(request, "customer_id");
+        String accessToken = CommonUtil.readCookie(request, "accessTkn");
+        String basketBody = CommonUtil.getBody(request);
+
+        String siteId = null;
+        BasketResponse basket = null;
+        if (null != pagePath) {
+            siteId = CommonUtil.getChanelId(resourceResolver, pagePath);
+        }
+
+
+        if (null != selector && null != accessToken && null != siteId) {
+            if (StringUtils.equalsIgnoreCase(selector, "addItem")) {
+                basket = shoppingBagService.addItemToBasket(customerId, siteId, accessToken, basketBody, gift);
+            } else if (StringUtils.equalsIgnoreCase(selector, "addMultiple")) {
+                basket = shoppingBagService.addMultiplePdtsToBasket(customerId, siteId, accessToken, basketBody);
+            } else if (StringUtils.equalsIgnoreCase(selector, "updateItem")) {
+                String basketId = (request.getParameter("basketId") != null) ? request.getParameter("basketId") : null;
+                String itemId = (request.getParameter("itemId") != null) ? request.getParameter("itemId") : null;
+                basket = shoppingBagService.updateItemInBasket(siteId, accessToken, basketId, itemId, basketBody);
+            } else if (StringUtils.equalsIgnoreCase(selector, "addSamples")) {
+                basket = shoppingBagService.addFreeSamples(customerId, siteId, accessToken, basketBody);
+            }
+            if (null != basket) {
+                response.setContentType("application/json");
+                response.setCharacterEncoding("UTF-8");
+                response.getWriter().println(new ObjectMapper().writeValueAsString(basket));
+            }
+        }
+
+    }
+
+    /**
+     * @param request   SlingHttpServletRequest
+     * @param response  SlingHttpServletResponse
+     * @param promoCode String
+     * @param basketID  String
+     * @return JsonObject
+     */
+    private JsonObject processPromoCodeValidation(SlingHttpServletRequest request, SlingHttpServletResponse response, String promoCode, String basketID) {
+        JsonObject finalResponse;
+        int attempt = 0;
+        String cjson = "";
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (Cookie cookie : cookies) {
+                if (cookie.getName().equals("ipca") && cookie.getValue() != null) {
+                    attempt = Integer.parseInt(cookie.getValue());
+                }
+                if (cookie.getName().equals(C_JSON) && cookie.getValue() != null) {
+                    cjson = cookie.getValue();
+                }
+            }
+        }
+        finalResponse = shoppingBagService.getPromoCodeResponse(promoCode, basketID, attempt, cjson);
+        if (finalResponse != null && finalResponse.has(ATTEMPT)) {
+            processFinalResponse(request, response, finalResponse, attempt, cjson, cookies);
+        }
+        return finalResponse;
+    }
+
+    /**
+     * @param request       SlingHttpServletRequest
+     * @param response      SlingHttpServletResponse
+     * @param finalResponse JsonObject
+     * @param attempt       int
+     * @param cjson         String
+     * @param cookies       Cookie[]
+     */
+    private void processFinalResponse(SlingHttpServletRequest request, SlingHttpServletResponse response, JsonObject finalResponse, int attempt, String cjson, Cookie[] cookies) {
+        Cookie pc = new Cookie("ipca", finalResponse.get(ATTEMPT).getAsString());
+        if (attempt == 4) {
+            String cjData = finalResponse.get(C_JSON_DATA).toString().replace("\"", "'");
+            Cookie cookie = new Cookie(C_JSON, cjData);
+            response.addCookie(cookie);
+        }
+        response.addCookie(pc);
+        if (!cjson.equals("")) {
+            processCJson(request, response, finalResponse, cjson, cookies);
+        }
+    }
+
+    /**
+     * @param response      SlingHttpServletResponse
+     * @param finalResponse JsonObject
+     */
+    private void processFinalResponse(SlingHttpServletResponse response, JsonObject finalResponse) {
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        try {
+            response.getWriter().print(finalResponse);
+        } catch (IOException e) {
+            LOGGER.error("IOException occurred in the ShoppingBagServlet mockJson method :: {} {}", e.getCause(), e.getMessage());
+        }
+    }
+
+    /**
+     * @param request       SlingHttpServletRequest
+     * @param response      SlingHttpServletResponse
+     * @param finalResponse JsonObject
+     * @param cjson         String
+     * @param cookies       Cookie[]
+     */
+    private void processCJson(SlingHttpServletRequest request, SlingHttpServletResponse response, JsonObject finalResponse, String cjson, Cookie[] cookies) {
+        JsonObject cj = getGson().fromJson(cjson, JsonObject.class);
+        if (cj != null && cj.has("addCouponRequest")) {
+            JsonObject addCouponReq = cj.get("addCouponRequest").getAsJsonObject();
+            if (addCouponReq != null && addCouponReq.has("countFailed") && finalResponse.has("lFlag")) {
+                int failedAttempt = addCouponReq.get("countFailed").getAsInt();
+                boolean flag = finalResponse.get("lFlag").getAsBoolean();
+                if (failedAttempt == 5 && !flag) {
+                    if (finalResponse.has("couponItems")) {
+                        clearCookiePC(request, response);
+                    } else {
+                        finalResponseHasNoCouponItems(response, finalResponse, cookies);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * @param response      SlingHttpServletResponse
+     * @param finalResponse JsonObject
+     * @param cookies       Cookie[]
+     */
+    private void finalResponseHasNoCouponItems(SlingHttpServletResponse response, JsonObject finalResponse, Cookie[] cookies) {
+        String cjsonObj = shoppingBagService.getCjsonData(1);
+        JsonObject tcjson = getGson().fromJson(cjsonObj, JsonObject.class);
+        finalResponse.add(C_JSON_DATA, tcjson);
+        String cjData = finalResponse.get(C_JSON_DATA).toString().replace("\"", "'");
+        finalResponse.addProperty(ATTEMPT, 1);
+        for (Cookie cookie : cookies) {
+            if (cookie.getName().equals("ipca") && cookie.getValue() != null) {
+                cookie.setValue("1");
+                response.addCookie(cookie);
+            }
+            if (cookie.getName().equals(C_JSON) && cookie.getValue() != null) {
+                cookie.setValue(cjData);
+                response.addCookie(cookie);
+            }
+        }
+    }
+
+    /**
+     * @return Gson object
+     */
+    public Gson getGson() {
+        return new Gson();
+    }
+
+    /**
+     * @param request  SlingHttpServletRequest
+     * @param response SlingHttpServletResponse
+     */
+    public void clearCookiePC(SlingHttpServletRequest request, SlingHttpServletResponse response) {
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (Cookie cookie : cookies) {
+                if (cookie.getName().equals("ipca") && cookie.getValue() != null) {
+                    cookie.setValue("0");
+                    response.addCookie(cookie);
+                }
+                if (cookie.getName().equals(C_JSON) && cookie.getValue() != null) {
+                    cookie.setMaxAge(0);
+                    response.addCookie(cookie);
+                }
+            }
+        }
+    }
+
+}
+
